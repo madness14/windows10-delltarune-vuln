@@ -1,0 +1,206 @@
+- name: aprovisionamiento windows vulnerable (Windows 10)
+  hosts: all
+  gather_facts: no
+  vars:
+    ansible_user: vagrant
+    ansible_password: vagrant
+    ansible_connection: winrm
+    ansible_winrm_transport: plaintext
+    ansible_winrm_scheme: http
+    ansible_winrm_server_cert_validation: ignore
+
+  tasks:
+    
+    - name: crear carpeta compartida
+      win_file:
+        path: C:\tempshare
+        state: directory
+
+    - name: copiar archivos de samba (assets para share)
+      win_copy:
+        src: templates/samba/
+        dest: C:\tempshare\
+        remote_src: no
+
+    - name: otorgar permisos NTFS recursivos a C:\tempshare para Everyone
+      win_acl:
+        path: C:\tempshare
+        user: 'Everyone'
+        rights: FullControl
+        type: allow
+        state: present
+        recurse: yes
+
+    - name: crear el share Publico con permisos vulnerables
+      win_shell: |
+        net share Publico /DELETE /Y
+        net share Publico=C:\tempshare /GRANT:Everyone,FULL 
+
+    - name: declarar Publico como NullSessionShares (multistring) - Win7
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: NullSessionShares
+        data:
+          - Publico
+        type: multistring
+
+    - name: copiar instalador xampp
+      win_copy:
+        src: files/xampp-installer.exe
+        dest: C:\xampp-installer.exe
+        remote_src: no
+
+    - name: instalar xampp en C:\xampp (modo silencioso)
+      win_shell: |
+        Start-Process "C:\xampp-installer.exe" `
+          -ArgumentList "--mode unattended --unattendedmodeui none --prefix C:\xampp" `
+          -Wait
+      args:
+        creates: C:\xampp
+
+    - name: comprobar que apache existe
+      win_stat:
+        path: C:\xampp\apache\bin\httpd.exe
+      register: apache_bin
+
+    - name: instalar apache como servicio (si httpd existe)
+      win_shell: |
+        C:\xampp\apache\bin\httpd.exe -k install
+      when: apache_bin.stat.exists
+
+    - name: iniciar Apache si existe
+      win_service:
+        name: Apache2.4
+        start_mode: auto
+        state: started
+      when: apache_bin.stat.exists
+
+    - name: permitir puerto 80 en firewall
+      win_firewall_rule:
+        name: HTTP
+        localport: 80
+        protocol: TCP
+        action: allow
+        direction: in
+        enabled: yes
+
+    - name: habilitar sqlite3 en php.ini (si existe)
+      win_lineinfile:
+        path: C:\xampp\php\php.ini
+        regexp: '^\s*;?\s*extension=sqlite3'
+        line: 'extension=sqlite3'
+        backrefs: no
+      when: apache_bin.stat.exists
+
+    - name: reiniciar Apache para aplicar php.ini si existe
+      win_service:
+        name: Apache2.4
+        state: restarted
+      when: apache_bin.stat.exists
+
+    - name: copiar sitio vulnerable (index, login.php, assets)
+      win_copy:
+        src: templates/vulnsite/
+        dest: C:\xampp\htdocs\
+        remote_src: no
+
+    - name: crear index fallback si falta
+      win_stat:
+        path: C:\xampp\htdocs\index.html
+      register: idx_stat
+
+    - name: instalar index.html de fallback
+      win_copy:
+        src: templates/vulnsite/index.html
+        dest: C:\xampp\htdocs\index.html
+        remote_src: no
+      when: not idx_stat.stat.exists
+
+    - name: crear usuarios locales
+      win_user:
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+        state: present
+        groups: "{{ item.groups | default(omit) }}"
+      loop:
+        - { name: kris,   password: "blackknife", groups: ["Administrators"] }
+        - { name: susie,  password: "sus13-rul3s", groups: ["Administrators"] }
+        - { name: ralsei, password: "cupc4kes-4nd-muffins" }
+        - { name: lancer, password: "susie-rules" }
+        - { name: guest, password: "guest" }
+
+    - name: otorgar solo lectura NTFS a Guest sobre C:\tempshare
+      win_acl:
+        path: C:\tempshare
+        user: guest
+        rights: ReadAndExecute
+        type: allow
+        state: present
+        recurse: yes
+
+    - name: abrir puertos extra
+      win_shell: |
+        netsh advfirewall firewall add rule name="Puerto21" dir=in action=allow protocol=TCP localport=21
+        netsh advfirewall firewall add rule name="Puerto8080" dir=in action=allow protocol=TCP localport=8080
+        netsh advfirewall firewall add rule name="Puerto5900" dir=in action=allow protocol=TCP localport=5900
+
+    - name: permitir puerto 22 (SSH) en firewall
+      win_shell: |
+        netsh advfirewall firewall add rule name="SSH" dir=in action=allow protocol=TCP localport=22
+
+    - name: crear archivo importante_precaucion.txt en C:\
+      win_copy:
+        dest: C:\nota_para_Kris.txt
+        content: |
+          IMPORTANTE - POR FAVOR LEER KRIS
+          Hummmm... al parecer alguien...cof cof Susie... quizo descargar una pelicula ilegalmente
+          y... bueno, terminamos con un virus llamado spamton.ps1 que borró meses de trabajo...
+          pero al parecer he logrado eliminarlo... no estoy seguro... bueno :3
+          spamton deberia estar por algun lugar... si lo encuentras porfavor eliminalo Kris ^-^
+          - Ralsei
+
+    - name: permitir lectura total de nota_para_Kris.txt a Everyone
+      win_acl:
+        path: C:\nota_para_Kris.txt
+        user: Everyone
+        rights: Read
+        type: allow
+        state: present
+
+    - name: copiar spamton.ps1 a la papelera de reciclaje
+      win_copy:
+        src: templates/scripts/spamton.ps1
+        dest: C:\tmp\spamton.ps1
+        remote_src: no
+
+    - name: permitir ejecucion total de spamton.ps1 a Everyone
+      win_acl:
+        path: C:\tmp\spamton.ps1
+        user: Everyone
+        rights: FullControl
+        type: allow
+        state: present
+
+    - name: habilitar PowerShell Remoting
+      win_shell: |
+        Enable-PSRemoting -Force
+
+    - name: añadir admins a Administrators
+      win_group_membership:
+        name: Administrators
+        members:
+          - kris
+          - susie
+          - ralsei
+        state: present
+
+    - name: agregar kris, susie, ralsei y lancer a Remote Management Users
+      win_group_membership:
+        name: "Remote Management Users"
+        members:
+          - kris
+          - susie
+          - ralsei
+          - lancer
+        state: present
+
